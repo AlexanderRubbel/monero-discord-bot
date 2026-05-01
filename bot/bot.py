@@ -62,17 +62,17 @@ def post_discord(balance: int, unlocked: int, prev_balance: int | None) -> None:
     unl_xmr = to_xmr(unlocked)
 
     if prev_balance is None:
-        title = f"{WALLET_LABEL} – Initial-Saldo"
+        title = f"{WALLET_LABEL} – Initial Balance"
         delta_line = ""
     else:
         delta = to_xmr(balance - prev_balance)
         sign = "+" if delta >= 0 else ""
-        title = f"{WALLET_LABEL} – Saldo geändert"
-        delta_line = f"\n**Änderung:** {sign}{delta:.12f} XMR"
+        title = f"{WALLET_LABEL} – Balance Changed"
+        delta_line = f"\n**Change:** {sign}{delta:.12f} XMR"
 
     description = (
-        f"**Gesamt:** {bal_xmr:.12f} XMR\n"
-        f"**Verfügbar:** {unl_xmr:.12f} XMR"
+        f"**Total:** {bal_xmr:.12f} XMR\n"
+        f"**Available:** {unl_xmr:.12f} XMR"
         f"{delta_line}"
     )
     payload = {
@@ -92,25 +92,25 @@ def wait_for_rpc() -> None:
     for _ in range(60):
         try:
             rpc("get_version")
-            log.info("Wallet-RPC erreichbar")
+            log.info("Wallet-RPC reachable")
             return
         except Exception as e:
-            log.info("Warte auf wallet-rpc... (%s)", e)
+            log.info("Waiting for wallet-rpc... (%s)", e)
             time.sleep(5)
-    raise SystemExit("wallet-rpc nicht erreichbar nach 5 Minuten")
+    raise SystemExit("wallet-rpc not reachable after 5 minutes")
 
 
 def main() -> None:
     wait_for_rpc()
     state = load_state()
-    log.info("Starte Polling alle %s Sekunden", INTERVAL)
+    log.info("Starting polling every %s seconds", INTERVAL)
 
     while True:
         try:
             try:
                 rpc("refresh")
             except Exception as e:
-                log.warning("refresh fehlgeschlagen: %s", e)
+                log.warning("refresh failed: %s", e)
 
             res = rpc("get_balance")
             balance = res["balance"]
@@ -118,7 +118,7 @@ def main() -> None:
 
             if state["balance"] != balance:
                 log.info(
-                    "Saldo-Änderung: %s -> %s atomic units",
+                    "Balance change: %s -> %s atomic units",
                     state["balance"],
                     balance,
                 )
@@ -126,9 +126,9 @@ def main() -> None:
                 state = {"balance": balance, "unlocked": unlocked}
                 save_state(state)
             else:
-                log.info("Keine Änderung (%s XMR)", to_xmr(balance))
+                log.info("No change (%s XMR)", to_xmr(balance))
         except Exception:
-            log.exception("Check fehlgeschlagen")
+            log.exception("Check failed")
 
         time.sleep(INTERVAL)
 
