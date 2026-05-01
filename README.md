@@ -1,136 +1,156 @@
 # Monero Discord Balance Bot
 
-Postet den Kontostand eines Monero-Wallets in einem Discord-Channel — alle 15 Minuten wird gepollt, gesendet wird **nur bei Änderung**.
+Posts the balance of a Monero wallet to a Discord channel — polled every 15 minutes, posted **only on change**.
 
-Läuft auf Unraid (oder jedem Docker-Host) als zwei Container:
+Runs on any Docker host (tested on Unraid) as two containers:
 
-- `monero-wallet-rpc` — headless RPC-Daemon, lädt ein **View-Only-Wallet** (kann Saldo lesen, **kann nichts senden**)
-- `monero-discord-bot` — Python-Worker, fragt RPC ab und postet via Discord-Webhook
+- `monero-wallet-rpc` — headless RPC daemon, loads a **view-only wallet** (can read balance, **cannot send anything**)
+- `monero-discord-bot` — Python worker, queries the RPC and posts via Discord webhook
 
-Es wird ein öffentlicher Remote-Node verwendet (kein eigener `monerod` mit 200 GB Blockchain nötig).
+A public remote node is used by default (no need to run your own `monerod` with a 200 GB blockchain).
 
 ---
 
-## Sicherheitskonzept
+## Security model
 
-**Wichtig:** Auf dem Server liegt **nur** ein View-Only-Wallet. Selbst bei vollständiger Server-Kompromittierung kann ein Angreifer nichts versenden — er sieht nur den Saldo. Der Spend-Key bleibt auf deinem Rechner in der Monero GUI.
+**Important:** only a **view-only wallet** lives on the server. Even with full server compromise, an attacker can only read the balance — they cannot spend. The spend key never leaves the machine where you generated/imported the wallet (e.g. your Monero GUI).
+
+---
+
+## Requirements
+
+- A Docker host with `docker` and `docker compose` (Linux, Unraid, Synology with Container Manager, a VPS, a Raspberry Pi, etc.)
+- The address, secret view key, and restore height of the wallet you want to track
+- A Discord channel where you can create webhooks
 
 ---
 
 ## Setup
 
-### 1. View-Only-Wallet aus deiner GUI exportieren
+### 1. Export view-only credentials from your wallet
 
-Auf deinem Rechner in der **Monero GUI**:
+In the **Monero GUI** on the machine that holds the wallet:
 
-1. Öffne dein normales Wallet
-2. **Settings → Wallet → "Show address" / "Show seed"** — du brauchst:
-   - **Primary address** (`4...` oder `8...`)
-   - **Secret view key** (über *Wallet → Show seed & keys → "View key (secret)"*)
-   - **Restore height** (Settings → Info → "Wallet creation height" — falls unbekannt, aktuelle Blockhöhe minus ein paar Tausend)
+1. Open your normal wallet
+2. Get the following three values:
+   - **Primary address** (`4...` or `8...`) — *Receive* tab or *Settings → Wallet*
+   - **Secret view key** — *Wallet → Show seed & keys → "View key (secret)"*
+   - **Restore height** — *Settings → Info → "Wallet creation height" / "Restore height"*. If unknown, use a block height from shortly before the wallet was first used.
 
-Notiere diese drei Werte. Der **Spend Key wird NICHT gebraucht** und gehört auch nicht auf den Server.
+The **spend key is NOT needed** and must never be put on the server.
 
-### 2. Projekt auf den Unraid-Server kopieren
-
-Per SSH oder Krusader auf den Unraid-Server (192.168.1.5), z. B. nach `/mnt/user/appdata/monero-discord-bot/`:
+### 2. Get the project onto your Docker host
 
 ```bash
-ssh root@192.168.1.5
-mkdir -p /mnt/user/appdata/monero-discord-bot
-cd /mnt/user/appdata/monero-discord-bot
-# kompletten Projektordner per scp/rsync hierher kopieren
+# Clone (recommended — makes future updates a single git pull)
+git clone https://github.com/<your-fork>/monero-discord-bot.git
+cd monero-discord-bot
+
+# Or copy via scp/rsync from your workstation:
+# rsync -av ./monero-discord-bot/ user@host:/path/to/monero-discord-bot/
 ```
 
-### 3. View-Only-Wallet im Container erstellen (einmalig)
+Pick any directory you like. Common conventions:
 
-Im Projektverzeichnis:
+- Linux server: `/opt/monero-discord-bot/` or `~/monero-discord-bot/`
+- Unraid: `/mnt/user/appdata/monero-discord-bot/`
+- Synology: `/volume1/docker/monero-discord-bot/`
+
+### 3. Create the view-only wallet (one-time)
+
+From the project directory:
 
 ```bash
 mkdir -p wallet-data bot-data
+chown -R 1000:1000 wallet-data bot-data    # match the non-root user in the container
 docker compose build monero-wallet-rpc
 
-# Wallet-Passwort festlegen (frei waehlbar, wird auch von wallet-rpc gelesen)
-echo "DEIN_WALLET_PASSWORT" > wallet-data/wallet-password.txt
+# Set the wallet password (free choice, also read by wallet-rpc later).
+# Use printf (NOT echo) to avoid a trailing newline in the file.
+printf '%s' 'YOUR_WALLET_PASSWORD' > wallet-data/wallet-password.txt
 chmod 600 wallet-data/wallet-password.txt
+chown 1000:1000 wallet-data/wallet-password.txt
 
-# View-Only-Wallet anlegen (interaktiv)
+# Generate the view-only wallet (interactive)
 docker compose run --rm --entrypoint monero-wallet-cli monero-wallet-rpc \
   --generate-from-view-key /wallet/view-only-wallet \
   --restore-height <RESTORE_HEIGHT> \
+  --password-file /wallet/wallet-password.txt \
+  --mnemonic-language English \
   --offline
 ```
 
-Im interaktiven Prompt:
+At the interactive prompts:
 
-- **Standard address**: deine Primary Address (`4...`)
-- **View key**: der secret view key
-- **Wallet password**: dasselbe wie in `wallet-password.txt`
-- **Confirm password**: nochmal
-- **Language**: `1` (English)
+- **Standard address:** your primary address (`4...`)
+- **View key:** the secret view key
+- *(password is read from the file, no prompt)*
+- Background mining: `N`
+- Then type `exit` to leave the wallet shell.
 
-Anschließend `exit` eintippen.
+`wallet-data/` should now contain `view-only-wallet`, `view-only-wallet.keys`, and `view-only-wallet.address.txt`.
 
-In `wallet-data/` liegen jetzt: `view-only-wallet`, `view-only-wallet.keys`, `view-only-wallet.address.txt`.
-
-### 4. Discord-Webhook erstellen
+### 4. Create a Discord webhook
 
 In Discord:
 
-1. Server-Einstellungen → **Integrationen → Webhooks → Neuer Webhook**
-2. Ziel-Channel wählen, Namen vergeben
-3. **Webhook-URL kopieren**
+1. Server settings → **Integrations → Webhooks → New Webhook**
+2. Choose the target channel, give it a name
+3. **Copy the webhook URL** (looks like `https://discord.com/api/webhooks/...`)
 
-### 5. `.env` konfigurieren
+### 5. Configure `.env`
 
 ```bash
 cp .env.example .env
-nano .env
+nano .env       # or vi/vim/your editor
 ```
 
-Setze mindestens:
+Set at minimum:
 
-- `DISCORD_WEBHOOK_URL` — die kopierte Webhook-URL
-- `RPC_USER` / `RPC_PASS` — frei wählbar, nur intern zwischen Bot und wallet-rpc
-- `WALLET_LABEL` — Anzeigename in den Embeds
+- `DISCORD_WEBHOOK_URL` — the URL you just copied
+- `RPC_USER` / `RPC_PASS` — free choice, only used between bot and wallet-rpc internally. Generate a strong random password, e.g. `openssl rand -base64 32`.
+- `WALLET_LABEL` — display name in the Discord embeds
 
-### 6. Stack starten
+### 6. Start the stack
 
 ```bash
 docker compose up -d
 docker compose logs -f
 ```
 
-Der erste Sync dauert ein paar Minuten (Wallet scannt ab Restore-Height). Sobald `Wallet-RPC erreichbar` erscheint und der Bot pollt, ist alles bereit. Beim ersten Lauf wird ein **Initial-Saldo** gepostet — danach nur noch bei tatsächlichen Änderungen.
+The first sync takes a few minutes (the wallet scans from the restore height). Once `Wallet-RPC reachable` appears and the bot starts polling, it's ready. The first poll posts an **Initial Balance** message; from then on, only **balance changes** are posted.
 
 ---
 
-## Updates / Wartung
+## Updates / maintenance
 
 ```bash
-docker compose pull
-docker compose up -d --build
+git pull                              # if you cloned
+docker compose up -d --build          # rebuild with latest code
 ```
 
-Monero-CLI-Version anpassen: in `wallet-rpc/Dockerfile` das `MONERO_VERSION`-Argument aktualisieren und `docker compose build --no-cache monero-wallet-rpc`.
+To bump the Monero CLI version, edit `MONERO_VERSION` in `wallet-rpc/Dockerfile` and:
+
+```bash
+docker compose build --no-cache monero-wallet-rpc
+docker compose up -d
+```
+
+To watch the live state:
+
+```bash
+docker compose ps
+docker compose logs -f monero-discord-bot
+```
 
 ---
 
-## Unraid-Hinweise
-
-- **Compose Manager Plugin**: in Unraid Apps installieren, dann unter "Compose" einen neuen Stack anlegen, auf das Projektverzeichnis zeigen lassen.
-- **Speicherort**: `/mnt/user/appdata/monero-discord-bot/` ist die Konvention.
-- **Wallet-Backup**: `wallet-data/` regelmäßig sichern (View-Only-Wallet ist klein — ein paar KB).
-- **Ports**: Es werden **keine Ports nach außen exponiert**. wallet-rpc ist nur für den Bot im internen Docker-Netz erreichbar.
-
----
-
-## Dateistruktur
+## File layout
 
 ```
 monero-discord-bot/
 ├── docker-compose.yml
-├── .env                    # nicht committen
+├── .env                    # secrets — do not commit
 ├── .env.example
 ├── wallet-rpc/
 │   └── Dockerfile          # Monero CLI binaries
@@ -138,15 +158,69 @@ monero-discord-bot/
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── bot.py
-├── wallet-data/            # View-Only-Wallet + Passwort-Datei (persistent)
-└── bot-data/               # state.json (letzter bekannter Saldo)
+├── wallet-data/            # view-only wallet + password file (persistent)
+└── bot-data/               # state.json (last known balance)
 ```
+
+The bot persists the last known balance in `bot-data/state.json`. Delete that file to force a fresh "Initial Balance" post on next poll.
+
+---
+
+## Networking & ports
+
+The `docker-compose.yml` exposes **no ports to the host**. `monero-wallet-rpc` is reachable only from the `monero-discord-bot` container over an internal Docker network. The wallet-rpc connects outbound to a public Monero remote node (default: `node.sethforprivacy.com:18089`).
+
+If the default node is unreachable, set `REMOTE_NODE` in `.env` to another node — see the list at [moneroworld.com](https://moneroworld.com/#nodes). Alternatives that are usually up:
+
+- `xmr-node.cakewallet.com:18081`
+- `nodes.hashvault.pro:18081`
+- `node.monerodevs.org:18089`
+
+---
+
+## Platform notes
+
+### Unraid
+
+- Install the **Compose Manager** plugin from Apps if you want a UI; otherwise just `docker compose` from SSH works fine.
+- Convention: `/mnt/user/appdata/monero-discord-bot/`
+- The `chown 1000:1000` step on `wallet-data/` is required because Unraid's default ownership doesn't match the in-container `monero` user (uid 1000).
+
+### Synology DSM
+
+- Use Container Manager → Project → import this folder, or `docker compose` over SSH.
+- Make sure the project lives on a volume that supports proper file permissions (not a network share).
+
+### Generic Linux / VPS / Raspberry Pi
+
+- Works as-is. On ARM64 (e.g. Raspberry Pi 4/5) you may need to update the Monero download URL in `wallet-rpc/Dockerfile` to the `linux-armv8` variant.
+
+---
+
+## Backup
+
+`wallet-data/` is small (a few hundred KB) and contains:
+
+- `view-only-wallet.keys` — the encrypted view key (cannot spend)
+- `view-only-wallet` — cache of scanned blocks (regenerable)
+- `wallet-password.txt` — the password protecting the keys file
+
+Back up `view-only-wallet.keys` and `wallet-password.txt`. The cache (`view-only-wallet`) will rebuild itself on first sync.
+
+You don't need to back up the bot's state — losing `bot-data/state.json` only causes one extra "Initial Balance" Discord post on next start.
 
 ---
 
 ## Troubleshooting
 
-- **`Wallet-RPC nicht erreichbar`** → meist falsches `wallet-password.txt` oder Wallet-Datei kaputt. `docker compose logs monero-wallet-rpc` prüfen.
-- **Saldo bleibt 0** → Restore-Height zu hoch. Wallet neu erstellen mit niedrigerer Höhe.
-- **Remote-Node antwortet nicht** → in `.env` einen anderen `REMOTE_NODE` setzen (Liste auf [moneroworld.com](https://moneroworld.com/#nodes)).
-- **Bot postet nichts** → Webhook-URL prüfen, `docker compose logs monero-discord-bot`.
+- **`wallet-rpc not reachable after 5 minutes`** → wrong `wallet-password.txt`, or wallet-rpc still doing the initial scan. Check `docker compose logs monero-wallet-rpc`. The RPC server only starts listening after the first refresh completes.
+- **Balance stays at 0** → restore height is too high (after the wallet's first transaction). Recreate the wallet with a lower restore height.
+- **Remote node not responding** → set a different `REMOTE_NODE` in `.env` and `docker compose up -d --force-recreate monero-wallet-rpc`.
+- **Bot posts nothing** → check `DISCORD_WEBHOOK_URL` and `docker compose logs monero-discord-bot`.
+- **Permission denied on wallet files** → ensure `wallet-data/` is owned by `1000:1000` (the container's `monero` user).
+
+---
+
+## License
+
+Use at your own risk. View-only wallets cannot spend coins, but always understand what you're putting on a server before doing so.
